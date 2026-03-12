@@ -11,7 +11,6 @@ def solve():
         'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
         'accept-language': 'en-US,en;q=0.5',
         'cache-control': 'no-cache',
-        #'dnt': '1',
         'pragma': 'no-cache',
         'priority': 'u=0, i',
         'sec-ch-ua': '"Chromium";v="136", "Brave";v="136", "Not.A/Brand";v="99"',
@@ -28,18 +27,26 @@ def solve():
     response = session.get("https://www.binance.com/")
     goku, host = AwsWaf.extract(response.text)
 
+    # Pass session to AwsWaf so it uses the same session
+    awswaf = AwsWaf(goku, host, "www.binance.com", session=session)
+
     start = time.time()
-    token = AwsWaf(goku, host, "www.binance.com")()
+    token = awswaf()
     end = time.time()
 
-    session.headers.update({
-        "cookie": "aws-waf-token=" + token
-    })
-    solved = len(session.get("https://www.binance.com/").text) > 20000
-    if solved:
+    # Set cookie for test request
+    session.cookies.set("aws-waf-token", token)
+
+    # Test access
+    test_resp = session.get("https://www.binance.com/")
+
+    if test_resp.headers.get('x-amzn-waf-action') != 'challenge' and len(test_resp.text) > 20000:
         print("[+] Solved:", token, "in", str(end - start) + "s")
+        print("[+] Page length:", len(test_resp.text))
     else:
         print("failed to solve!")
+        print("Response length:", len(test_resp.text))
+        print("WAF action:", test_resp.headers.get('x-amzn-waf-action'))
 
 
 if __name__ == "__main__":
