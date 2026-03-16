@@ -1,19 +1,54 @@
+import os
 import time
 
 from awswaf.aws import AwsWaf
+from awswaf.captcha_solver import solve_with_playwright
 from curl_cffi import requests
-from concurrent.futures import ThreadPoolExecutor
 
 # Test sites
 TEST_SITES = [
-    ("binance", "https://www.binance.com/"),
-    ("thumbtack", "https://www.thumbtack.com/"),
-    ("sothebysrealty", "https://www.sothebysrealty.com/"),
-    # ("officeworks", "https://www.officeworks.com.au/"),  # Uses captcha, not mp_verify
+    # mp_verify challenge
+    ("binance.com", "https://www.binance.com/"),
+    ("kaikoura.govt.nz", "https://www.kaikoura.govt.nz/"),
+    ("cppinvestments.com", "https://www.cppinvestments.com/"),
+    # CAPTCHA challenge (solved with vision model)
+    ("telaambientes.com.br", "https://telaambientes.com.br/"),
+    # mp_verify with www redirect
+    ("daybrookmedicalpractice.co.uk", "https://daybrookmedicalpractice.co.uk/"),
+    ("thebushdoctors.co.uk", "https://thebushdoctors.co.uk/"),
+    ("swanlowmedicalcentre.co.uk", "https://swanlowmedicalcentre.co.uk/"),
 ]
+
 
 def solve_site(name, url):
     """Solve WAF challenge for a single site"""
+    # Try original URL first, then try with www prefix
+    result = solve_site_with_url(name, url) or solve_site_with_url(name, url.replace("https://", "https://www."))
+
+    # If mp_verify fails, try CAPTCHA solver
+    if not result:
+        result = solve_captcha(url)
+
+    return result
+
+
+def solve_captcha(url, api_key=None):
+    """Solve CAPTCHA challenge using Playwright + vision model"""
+    if api_key is None:
+        api_key = os.environ.get('DASHSCOPE_API_KEY')
+        if not api_key:
+            print("  [-] No DASHSCOPE_API_KEY set")
+            return False
+
+    try:
+        return solve_with_playwright(url, api_key)
+    except Exception as e:
+        print(f"  [-] CAPTCHA solver error: {e}")
+        return False
+
+
+def solve_site_with_url(name, url):
+    """Solve WAF challenge for a single site with specific URL"""
     session = requests.Session(impersonate="chrome")
 
     session.headers = {
@@ -37,19 +72,19 @@ def solve_site(name, url):
     try:
         response = session.get(url)
     except Exception as e:
-        print(f"[-] {name}: Connection error - {e}")
         return False
 
-    # Check if WAF challenge is present
-    if response.status_code != 202 and 'gokuProps' not in response.text:
-        # No challenge, site might not have WAF or already accessible
-        print(f"[?] {name}: No WAF challenge detected (status={response.status_code})")
-        return True
+    # Check if page loaded directly (no challenge)
+    if 'gokuProps' not in response.text:
+        # No WAF challenge - page loaded directly
+        if response.status_code == 200 and len(response.text) > 5000:
+            print(f"[+] {name}: No challenge (page: {len(response.text)} bytes)")
+            return True
+        return False
 
     try:
         goku, host = AwsWaf.extract(response.text)
     except Exception as e:
-        print(f"[-] {name}: Failed to extract goku props - {e}")
         return False
 
     # Pass session to AwsWaf so it uses the same session
@@ -60,7 +95,6 @@ def solve_site(name, url):
     try:
         token = awswaf()
     except Exception as e:
-        print(f"[-] {name}: Failed to solve - {e}")
         return False
     end = time.time()
 
@@ -71,10 +105,9 @@ def solve_site(name, url):
     test_resp = session.get(url)
 
     if test_resp.headers.get('x-amzn-waf-action') != 'challenge' and len(test_resp.text) > 5000:
-        print(f"[+] {name}: Solved in {str(end - start)[:6]}s (page: {len(test_resp.text)} bytes)")
+        print(f"[+] {name}: mp_verify solved in {str(end - start)[:6]}s (page: {len(test_resp.text)} bytes)")
         return True
     else:
-        print(f"[-] {name}: Failed (waf: {test_resp.headers.get('x-amzn-waf-action')}, len: {len(test_resp.text)})")
         return False
 
 

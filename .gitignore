@@ -5,3 +5,24 @@ proxies.txt
 in.js
 out.js
 .idea
+
+# Analysis and test files
+*.md
+challenge_new*.js
+deep_analysis.py
+deobf/
+deobf*.js
+
+# Python
+venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Test files
+test_*.py
+analyze_*.py
+awswaf/captcha_solver.py
+
+# Test results
+test-results*.md
