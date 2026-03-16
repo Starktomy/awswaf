@@ -47,13 +47,49 @@ class AwsWaf:
             f"https://{self.endpoint}/inputs?client=browser").json()
 
     def build_payload(self, inputs: dict):
+        import base64
+
         challenge_type = inputs["challenge_type"]
         verify = CHALLENGE_TYPES.get(challenge_type)
         checksum, fp = get_fp(self.user_agent)
 
+        # Challenge can be a dict (with "input", "hmac", "region") or base64 string
+        challenge = inputs["challenge"]
+        if isinstance(challenge, dict):
+            # New format: challenge is a dict with "input" (base64), "hmac", "region"
+            inner_challenge = json.loads(base64.b64decode(challenge["input"]))
+            actual_challenge_type = inner_challenge.get("challenge_type", "")
+            difficulty = inner_challenge.get("difficulty", 1)
+        else:
+            # Old format: challenge is base64-encoded JSON directly
+            challenge_data = json.loads(base64.b64decode(challenge))
+            actual_challenge_type = challenge_data.get("challenge_type", "")
+            difficulty = challenge_data.get("difficulty", 1)
+
+        # Handle NetworkBandwidth challenge
+        if actual_challenge_type == "NetworkBandwidth":
+            # NetworkBandwidth requires sending specific bytes based on difficulty
+            # Difficulty 1: 1KB, 2: 10KB, 3: 100KB, 4: 1MB, 5: 10MB
+            bytes_required = self._calculate_bandwidth_bytes(difficulty)
+            solution_data = base64.b64encode(b'\x00' * bytes_required).decode('utf-8')
+            solution_metadata = json.dumps({
+                "challenge": inputs["challenge"],
+                "solution": None,
+                "signals": [{"name": "Zoey", "value": {"Present": fp}}],
+                "checksum": checksum,
+                "existing_token": None,
+                "client": "Browser",
+                "domain": self.domain,
+                "metrics": self._generate_metrics(),
+                "goku_props": self.goku_props,
+            }, separators=(',', ':'))
+            return {
+                "solution_data": solution_data,
+                "solution_metadata": solution_metadata
+            }
+
         # Handle mp_verify challenge type
-        if challenge_type == "mp_verify" or verify == "mp_verify":
-            import base64
+        if challenge_type == "mp_verify" or verify == "mp_verify" or actual_challenge_type == "mp_verify":
             # mp_verify uses multipart/form-data with solution_data
             solution_data = base64.b64encode(b'\x00' * 1024).decode('utf-8')
             solution_metadata = json.dumps({
@@ -72,17 +108,34 @@ class AwsWaf:
                 "solution_metadata": solution_metadata
             }
 
-        # Standard JSON payload for other challenge types
+        # Standard JSON payload for other challenge types (hash_pow, scrypt)
         return {
             "challenge": inputs["challenge"],
             "checksum": checksum,
-            "solution": verify(inputs["challenge"]["input"], checksum, inputs["difficulty"]),
+            "solution": verify(inputs["challenge"], checksum, difficulty),
             "signals": [{"name": "Zoey", "value": {"Present": fp}}],
             "existing_token": None,
             "client": "Browser",
             "domain": self.domain,
             "metrics": self._generate_metrics(),
         }
+
+    def _calculate_bandwidth_bytes(self, difficulty: int) -> int:
+        """Calculate required bytes for NetworkBandwidth challenge"""
+        # Based on analysis of challenge.js:
+        # Difficulty 1: 0x400 = 1024 bytes (1KB)
+        # Difficulty 2: 0xa * 0x400 = 10240 bytes (10KB)
+        # Difficulty 3: 0x64 * 0x400 = 102400 bytes (100KB)
+        # Difficulty 4: 0x1 * 0x100000 = 1048576 bytes (1MB)
+        # Difficulty 5: 0xa * 0x100000 = 10485760 bytes (10MB)
+        multipliers = {
+            1: 0x400,           # 1024
+            2: 0xa * 0x400,     # 10240
+            3: 0x64 * 0x400,    # 102400
+            4: 0x1 * 0x100000,  # 1048576
+            5: 0xa * 0x100000,  # 10485760
+        }
+        return multipliers.get(difficulty, 0x400)
 
     def _generate_metrics(self):
         """Generate random metrics to simulate browser behavior"""
